@@ -8,6 +8,7 @@ export default function App() {
   const [connected, setConnected] = useState(false)
   const wsRef = useRef(null)
   const [hasStarted, setHasStarted] = useState(false)
+  const [canStart, setCanStart] = useState(false)
 
   useEffect(() => {
     let ws
@@ -33,6 +34,14 @@ export default function App() {
             if (t === 'game_created' || t === 'betting_open' || t === 'betting_tick' || t === 'betting_closed' || t === 'game_start' || t === 'battle_tick' || t === 'round_result') {
               setHasStarted(true)
             }
+            // Enable Start Game button when we receive bets_update with null game_id
+            if (t === 'bets_update' && (evt?.data?.game_id == null)) {
+              setCanStart(true)
+            }
+            // During any active game-related events, prevent starting again
+            if (t === 'game_created' || t === 'betting_open' || t === 'game_start') {
+              setCanStart(false)
+            }
           } catch {
             setPacket({ error: 'invalid_json', raw: String(msg.data) })
           }
@@ -57,7 +66,7 @@ export default function App() {
     <div className="p-4">
       <div className="text-xs mb-2">status: {connected ? 'connected' : 'disconnected, retrying...'}</div>
       <div className="mb-3">
-        <button className="px-4 py-2 cursor-pointer hover:bg-indigo-700 transition-colors rounded bg-indigo-600 text-white disabled:opacity-50" disabled={!connected || hasStarted} onClick={() => {
+        <button className="px-4 py-2 cursor-pointer hover:bg-indigo-700 transition-colors rounded bg-indigo-600 text-white disabled:opacity-50" disabled={!connected || (hasStarted && !canStart)} onClick={() => {
           try { wsRef.current?.send(JSON.stringify({ event: 'start_game' })) } catch { }
         }}>Start Game</button>
       </div>
