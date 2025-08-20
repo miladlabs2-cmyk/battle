@@ -8,6 +8,7 @@ import betting_closed from './betting_closed.jsx'
 import game_start from './game_start.jsx'
 import battle_tick from './battle_tick.jsx'
 import round_result from './round_result.jsx'
+import final_round_result from './final_round_result.jsx'
 import new_round_countdown from './new_round_countdown.jsx'
 import cooldown_tick from './cooldown_tick.jsx'
 import bet_accepted from './bet_accepted.jsx'
@@ -24,6 +25,7 @@ export const EventComponents = {
     game_start,
     battle_tick,
     round_result,
+    final_round_result,
     new_round_countdown,
     cooldown_tick,
     bet_accepted,

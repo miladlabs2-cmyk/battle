@@ -1,5 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
-const { BETTING_SECONDS, START_DELAY_MS, BATTLE_TICK_MS, COOLDOWN_SECONDS, TEAM_NAMES, STARTING_HP, TEAMS } = require('../config');
+const { BETTING_SECONDS, START_DELAY_MS, BATTLE_TICK_MS, COOLDOWN_SECONDS, TEAM_NAMES, CASES } = require('../config');
 const { game, GamePhase, playersById } = require('../state');
 const { broadcast } = require('../messaging');
 const { recordBlock } = require('../storage');
@@ -13,8 +13,15 @@ function resetGame(roundId = uuidv4()) {
     game.countdown = null;
     game.bets = new Map();
     game.totals = Object.fromEntries(TEAM_NAMES.map((team) => [team, 0]));
-    game.initialHp = Object.fromEntries(TEAMS.map((t) => [t.name, STARTING_HP * t.count]));
-    game.hp = { ...game.initialHp };
+    game.casesOrder = Object.keys(CASES);
+    game.caseIdx = 0;
+    game.sequence = [];
+    game.position = -1;
+    game.targetIndex = null;
+    game.currentCaseKey = null;
+    game.currentCaseCounts = null;
+    game.caseResults = [];
+    game.lastWinner = null;
     if (game.tickTimer) clearInterval(game.tickTimer);
     game.tickTimer = null;
 }
@@ -54,46 +61,7 @@ function closeBetting() {
 function startBattle() {
     if (game.phase !== GamePhase.Starting) return;
     game.phase = GamePhase.InProgress;
-    recordBlock('game_start', { game_id: game.id, hp: game.hp });
-    broadcast('game_start', { game_id: game.id, started_at: Date.now(), hp: game.hp });
-
-    game.tickTimer = setInterval(() => {
-        if (game.phase !== GamePhase.InProgress) {
-            clearInterval(game.tickTimer);
-            game.tickTimer = null;
-            return;
-        }
-
-        const aliveTeams = TEAM_NAMES.filter((team) => game.hp[team] > 0);
-        if (aliveTeams.length <= 1) {
-            clearInterval(game.tickTimer);
-            game.tickTimer = null;
-            endRound(aliveTeams[0]);
-            return;
-        }
-        const attacker = pickWeightedTeam(aliveTeams, (team) => game.hp[team]);
-        const potentialDefenders = aliveTeams.filter((team) => team !== attacker);
-        const defender = pickWeightedTeam(potentialDefenders, (team) => game.hp[team]);
-        const damage = getRandomInt(8, 20);
-        game.hp[defender] = Math.max(0, game.hp[defender] - damage);
-
-        const tickPayload = {
-            game_id: game.id,
-            attacker,
-            defender,
-            damage,
-            hp: game.hp,
-        };
-        recordBlock('battle_tick', tickPayload);
-        broadcast('battle_tick', tickPayload);
-
-        const aliveAfter = TEAM_NAMES.filter((team) => game.hp[team] > 0);
-        if (aliveAfter.length <= 1) {
-            clearInterval(game.tickTimer);
-            game.tickTimer = null;
-            endRound(aliveAfter[0] || attacker);
-        }
-    }, BATTLE_TICK_MS);
+    startNextCase();
 }
 
 function endRound(winningSide) {
@@ -101,25 +69,25 @@ function endRound(winningSide) {
     game.phase = GamePhase.Ended;
 
     const settlement = settleBets(winningSide);
-    recordBlock('round_result', { game_id: game.id, winner: winningSide, totals: game.totals, settlement });
-    broadcast('round_result', {
-        game_id: game.id,
-        winner: winningSide,
-        totals: game.totals,
-        settlement,
-        ended_at: Date.now(),
-    });
+    const roundResult = { game_id: game.id, winner: winningSide, totals: game.totals, settlement, sequence: game.sequence, target_index: game.targetIndex };
+    recordBlock('round_result', roundResult);
+    broadcast('round_result', roundResult);
+
+    const finalPayload = { game_id: game.id, case_results: game.caseResults || [], final_winner: winningSide, finished_at: Date.now() };
+    recordBlock('final_round_result', finalPayload);
+    broadcast('final_round_result', finalPayload);
 
     // Stop the game here; do not auto-restart or start cooldown
-    // Server remains idle after round_result
+    // Server remains idle after final_round_result
     return;
 }
 
 function settleBets(winningSide) {
     const perPlayerPayout = {};
-    const totalInitialHp = Object.values(game.initialHp || {}).reduce((sum, v) => sum + v, 0);
-    const teamInitialHp = (game.initialHp || {})[winningSide] || 1;
-    const payoutMultiplier = totalInitialHp > 0 ? (totalInitialHp / teamInitialHp) : 1;
+    const counts = game.currentCaseCounts || {};
+    const totalSlots = Object.values(counts).reduce((sum, v) => sum + v, 0);
+    const teamSlots = counts[winningSide] || 1;
+    const payoutMultiplier = totalSlots > 0 ? (totalSlots / teamSlots) : 1;
     for (const [playerId, bet] of game.bets.entries()) {
         const player = playersById.get(playerId);
         if (!player) continue;
@@ -188,17 +156,91 @@ module.exports = {
     serializeGameState,
 };
 
-function pickWeightedTeam(teams, weightFn) {
-    let total = 0;
-    for (const t of teams) total += Math.max(0, Number(weightFn(t)) || 0);
-    if (total <= 0) return teams[Math.floor(Math.random() * teams.length)];
-    let r = Math.random() * total;
-    for (const t of teams) {
-        const w = Math.max(0, Number(weightFn(t)) || 0);
-        if (r < w) return t;
-        r -= w;
+function shuffleInPlace(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
     }
-    return teams[teams.length - 1];
+}
+
+function startNextCase() {
+    const caseKeys = game.casesOrder || [];
+    if (game.caseIdx >= caseKeys.length) {
+        endRound(game.lastWinner);
+        return;
+    }
+    const key = caseKeys[game.caseIdx];
+    game.currentCaseKey = key;
+    const teams = CASES[key] || [];
+    const counts = Object.fromEntries(teams.map(t => [t.name, t.count]));
+    game.currentCaseCounts = counts;
+
+    const slots = [];
+    for (const t of teams) {
+        for (let i = 0; i < t.count; i++) slots.push(t.name);
+    }
+    shuffleInPlace(slots);
+    game.sequence = slots;
+    game.position = -1;
+    game.targetIndex = Math.max(0, slots.length - 4);
+
+    const totalTicks = game.targetIndex + 1;
+    const intervalMs = Math.max(10, Math.floor(3000 / Math.max(1, totalTicks)));
+
+    recordBlock('game_start', { game_id: game.id, started_at: Date.now(), sequence: game.sequence, target_index: game.targetIndex, case_key: key, case_index: game.caseIdx, total_cases: caseKeys.length });
+    broadcast('game_start', { game_id: game.id, started_at: Date.now(), sequence: game.sequence, target_index: game.targetIndex, case_key: key, case_index: game.caseIdx, total_cases: caseKeys.length });
+
+    if (game.tickTimer) {
+        try { clearInterval(game.tickTimer); } catch { }
+        game.tickTimer = null;
+    }
+
+    game.tickTimer = setInterval(() => {
+        if (game.phase !== GamePhase.InProgress) {
+            clearInterval(game.tickTimer);
+            game.tickTimer = null;
+            return;
+        }
+
+        if (game.position < game.targetIndex) {
+            game.position += 1;
+        }
+
+        const tickPayload = {
+            game_id: game.id,
+            index: game.position,
+            total: game.sequence.length,
+            target_index: game.targetIndex,
+            sequence: game.sequence,
+            case_key: key,
+            case_index: game.caseIdx,
+            total_cases: caseKeys.length,
+        };
+        recordBlock('battle_tick', tickPayload);
+        broadcast('battle_tick', tickPayload);
+
+        if (game.position >= game.targetIndex) {
+            clearInterval(game.tickTimer);
+            game.tickTimer = null;
+            const winner = game.sequence[game.targetIndex];
+            game.lastWinner = winner;
+            const caseResult = {
+                game_id: game.id,
+                winner,
+                sequence: game.sequence,
+                target_index: game.targetIndex,
+                case_key: key,
+                case_index: game.caseIdx,
+                total_cases: caseKeys.length,
+                ended_at: Date.now(),
+            };
+            recordBlock('case_result', caseResult);
+            broadcast('case_result', caseResult);
+            try { game.caseResults.push(caseResult); } catch { }
+            game.caseIdx += 1;
+            startNextCase();
+        }
+    }, intervalMs);
 }
 
 
