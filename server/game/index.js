@@ -237,8 +237,33 @@ function startNextCase() {
             recordBlock('case_result', caseResult);
             broadcast('case_result', caseResult);
             try { game.caseResults.push(caseResult); } catch { }
-            game.caseIdx += 1;
-            startNextCase();
+
+            // Show per-case round_result for 2 seconds before moving to next case
+            const perCaseRound = {
+                game_id: game.id,
+                winner,
+                totals: game.totals,
+                settlement: {},
+                sequence: game.sequence,
+                target_index: game.targetIndex,
+                case_key: key,
+                case_index: game.caseIdx,
+                total_cases: caseKeys.length,
+                ended_at: Date.now(),
+            };
+            recordBlock('round_result', perCaseRound);
+            broadcast('round_result', perCaseRound);
+
+            const isLastCase = (game.caseIdx + 1) >= caseKeys.length;
+            setTimeout(() => {
+                if (game.phase !== GamePhase.InProgress) return;
+                if (isLastCase) {
+                    endRound(winner);
+                } else {
+                    game.caseIdx += 1;
+                    startNextCase();
+                }
+            }, 2000);
         }
     }, intervalMs);
 }

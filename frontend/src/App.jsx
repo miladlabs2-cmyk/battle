@@ -65,11 +65,13 @@ export default function App() {
   return (
     <div className="p-4">
       <div className="text-xs mb-2">status: {connected ? 'connected' : 'disconnected, retrying...'}</div>
-      <div className="mb-3">
-        <button className="px-4 py-2 cursor-pointer hover:bg-indigo-700 transition-colors rounded bg-indigo-600 text-white disabled:opacity-50" disabled={!connected || (hasStarted && !canStart)} onClick={() => {
-          try { wsRef.current?.send(JSON.stringify({ event: 'start_game' })) } catch { }
-        }}>Start Game</button>
-      </div>
+      {(connected && (!hasStarted || canStart)) ? (
+        <div className="mb-3">
+          <button className="px-4 py-2 cursor-pointer hover:bg-indigo-700 transition-colors rounded bg-indigo-600 text-white" onClick={() => {
+            try { wsRef.current?.send(JSON.stringify({ event: 'start_game' })) } catch { }
+          }}>Start Game</button>
+        </div>
+      ) : null}
       {Active ? <Active data={packet.data} /> : (
         <pre className="text-xs md:text-sm whitespace-pre-wrap break-words">{JSON.stringify(packet, null, 2)}</pre>
       )}
