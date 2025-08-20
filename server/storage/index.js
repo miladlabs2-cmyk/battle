@@ -3,16 +3,13 @@ const path = require('path');
 const crypto = require('crypto');
 
 const STORAGE_DIR = __dirname;
-const BLOCKS_FILE = path.join(STORAGE_DIR, 'blocks.jsonl');
+const GAMES_DIR = path.join(STORAGE_DIR, 'games');
 
 const BLOCK_TIME_MS = 3000;
 const MAX_TX_PER_BLOCK = 500;
 
-const writeQueue = [];
-let isWriting = false;
-let head = null; // { number, hash }
-let mempool = []; // queued txs waiting to be included
-let minerTimer = null;
+let head = null; // kept for backwards-compat; not used in per-game logging
+let minerTimer = null; // kept for backwards-compat; no mining needed now
 
 function ensureDirSync(dirPath) {
     if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
@@ -41,86 +38,44 @@ function computeMerkleRoot(txHashes) {
     return layer[0];
 }
 
-function enqueueWrite(line) {
-    writeQueue.push(line);
-    if (!isWriting) processQueue();
-}
-
-async function processQueue() {
-    isWriting = true;
-    ensureDirSync(STORAGE_DIR);
-    while (writeQueue.length) {
-        const line = writeQueue.shift();
-        try {
-            await fs.promises.appendFile(BLOCKS_FILE, line + '\n', 'utf8');
-        } catch (err) {
-            console.error('[storage] append error:', err?.message || err);
-        }
+async function appendToGameLog(gameId, line) {
+    try {
+        ensureDirSync(GAMES_DIR);
+        const filePath = path.join(GAMES_DIR, `${String(gameId)}.jsonl`);
+        await fs.promises.appendFile(filePath, line + '\n', 'utf8');
+    } catch (err) {
+        console.error('[storage] game append error:', err?.message || err);
     }
-    isWriting = false;
 }
 
 function readLastBlockSync() {
-    if (!fs.existsSync(BLOCKS_FILE)) return null;
-    const content = fs.readFileSync(BLOCKS_FILE, 'utf8');
-    const lines = content.trim().split('\n').filter(Boolean);
-    if (lines.length === 0) return null;
-    try { return JSON.parse(lines[lines.length - 1]); } catch { return null; }
+    return null; // disabled in per-game logging mode
 }
 
 function writeBlock(block) {
-    enqueueWrite(JSON.stringify(block));
-    head = { number: block.header.number, hash: block.hash };
+    // no-op in per-game logging mode
 }
 
 function createGenesisIfNeeded() {
-    const last = readLastBlockSync();
-    if (last && last.header && typeof last.header.number === 'number') {
-        head = { number: last.header.number, hash: last.hash };
-        return;
-    }
-    const header = {
-        number: 0,
-        parent_hash: '0x' + '0'.repeat(64),
-        timestamp: Date.now(),
-        merkle_root: '0x' + '0'.repeat(64),
-        nonce: 0,
-    };
-    const block = { header, hash: hashObject(header), txs: [] };
-    writeBlock(block);
+    ensureDirSync(GAMES_DIR);
 }
 
 function mineBlock() {
-    if (mempool.length === 0) return;
-    const txs = mempool.splice(0, MAX_TX_PER_BLOCK);
-    const txHashes = txs.map(tx => tx.tx_hash);
-    const header = {
-        number: head ? head.number + 1 : 1,
-        parent_hash: head ? head.hash : ('0x' + '0'.repeat(64)),
-        timestamp: Date.now(),
-        merkle_root: computeMerkleRoot(txHashes),
-        nonce: Math.floor(Math.random() * 1e6),
-    };
-    const block = { header, hash: hashObject(header), txs };
-    writeBlock(block);
+    // disabled in per-game logging mode
 }
 
 function startStorage() {
     ensureDirSync(STORAGE_DIR);
     createGenesisIfNeeded();
     if (minerTimer) clearInterval(minerTimer);
-    minerTimer = setInterval(mineBlock, BLOCK_TIME_MS);
 }
 
 function recordBlock(type, data) {
-    // Treat as a transaction queued for inclusion in the next mined block
-    const tx = {
-        type,
-        ts: Date.now(),
-        data: data || {},
-    };
+    const payload = data || {};
+    const gameId = payload && payload.game_id != null ? payload.game_id : 'unknown';
+    const tx = { type, ts: Date.now(), data: payload };
     tx.tx_hash = hashObject(tx);
-    mempool.push(tx);
+    appendToGameLog(gameId, JSON.stringify(tx));
 }
 
 module.exports = {
